@@ -1,16 +1,14 @@
-// app/api/confirm-retailer-order/route.ts
-
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/dbConnect';
 import Batch from '@/models/Batch';
 import Pusher from 'pusher';
 
 const pusher = new Pusher({
-  appId: process.env.PUSHER_APP_ID!,
-  key: process.env.NEXT_PUBLIC_PUSHER_KEY!,
-  secret: process.env.PUSHER_SECRET!,
-  cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER!,
-  useTLS: true,
+    appId: process.env.PUSHER_APP_ID!,
+    key: process.env.NEXT_PUBLIC_PUSHER_KEY!,
+    secret: process.env.PUSHER_SECRET!,
+    cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER!,
+    useTLS: true,
 });
 
 export async function POST(request: Request) {
@@ -50,6 +48,14 @@ export async function POST(request: Request) {
             },
             { new: true }
         );
+
+        if (!updatedBatch) {
+            // This should not happen, but is a good safeguard
+            return NextResponse.json({ message: 'Failed to update batch status.' }, { status: 500 });
+        }
+
+        // Log the data that is about to be sent to Pusher
+        console.log("Sending Pusher event 'new-order-request' with data:", { batch: updatedBatch });
 
         // Broadcast a Pusher event to the farmer's channel for syncing
         await pusher.trigger('farmer-channel', 'new-order-request', { batch: updatedBatch });

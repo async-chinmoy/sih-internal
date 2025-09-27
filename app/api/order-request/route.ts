@@ -1,5 +1,3 @@
-// app/api/order-request/route.ts
-
 import { v4 as uuidv4 } from 'uuid';
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
@@ -13,9 +11,9 @@ export async function POST(request: Request) {
     await dbConnect();
 
     const {
-      cropName,
+      cropName, 
       quantityKg,
-      selectedGrade,
+      selectedGrade, 
       contactPerson,
       contactPhone,
       preferredDate,
@@ -40,7 +38,7 @@ export async function POST(request: Request) {
       retailer: contactPerson,
       retailerPhone: contactPhone,
       harvestDate: preferredDate || new Date().toISOString().split('T')[0],
-      status: "Awaiting Retailer Confirmation", // NEW status
+      status: "Awaiting Farmer Confirmation", // NEW status
       price: price,
       quality: `Grade ${selectedGrade}`,
       createdAt: new Date().toISOString(),

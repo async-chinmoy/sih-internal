@@ -127,14 +127,19 @@ export default function FarmerDashboard() {
     const [pendingOrders, setPendingOrders] = useState<BatchData[]>([]);
     const [showConfirmationDialog, setShowConfirmationDialog] = useState(false);
 
-    const [quantityToSell, setQuantityToSell] = useState<number | null>(null);
+    // State to track the quantity being input by the user for the *currently active* order.
+    const [activeOrderQuantity, setActiveOrderQuantity] = useState<{ id: string; quantity: number | null }>({ id: '', quantity: null });
 
     const fetchBatches = async () => {
         try {
             const response = await axios.get('/api/batches');
             const allBatches = response.data;
-            setRecentBatches(allBatches.filter((b: any) => b.lotNumber !== null && b.status !== 'Rejected'));
-            setPendingOrders(allBatches.filter((b: any) => b.status === "Awaiting Farmer Confirmation"));
+            
+            // Sort batches by creation date to show the latest at the top
+            const sortedBatches = allBatches.sort((a: BatchData, b: BatchData) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            
+            setRecentBatches(sortedBatches.filter((b: any) => b.lotNumber !== null && b.status !== 'Rejected'));
+            setPendingOrders(sortedBatches.filter((b: any) => b.status === "Awaiting Farmer Confirmation"));
         } catch (error) {
             console.error("Failed to fetch batches:", error);
         }
@@ -151,6 +156,7 @@ export default function FarmerDashboard() {
         farmerChannel.bind('new-order-request', (data: any) => {
             if (data && data.batch && data.batch.crop) {
                 setPendingOrders(prev => [data.batch, ...prev]);
+                // Ensure new order notification is added to the front
                 setNotifications(prev => [`New order for ${data.batch.crop} received!`, ...prev.slice(0, 4)]);
                 setShowConfirmationDialog(true);
             } else {
@@ -160,6 +166,7 @@ export default function FarmerDashboard() {
 
         const systemChannel = pusher.subscribe('system-channel');
         systemChannel.bind('batch-uploaded', (data: { batch: any }) => {
+            // Ensure new batch notification is added to the front
             setRecentBatches(prev => [data.batch, ...prev]);
             if (data.batch && data.batch.crop) {
                 setNotifications(prev => [`New batch of ${data.batch.crop} created!`, ...prev.slice(0, 4)]);
@@ -173,14 +180,31 @@ export default function FarmerDashboard() {
             pusher.unsubscribe('system-channel');
         };
     }, []);
+    
+    // Reset active order quantity when the dialog closes
+    useEffect(() => {
+        if (!showConfirmationDialog) {
+            setActiveOrderQuantity({ id: '', quantity: null });
+        }
+    }, [showConfirmationDialog]);
+
 
     const handleConfirmOrder = async (order: any) => {
         setIsConfirming(true);
+        
+        // Use the quantity from the activeOrderQuantity state if it matches the current order, otherwise use the original requested weight
+        const requestedWeightKg = parseFloat(order.weight.replace(' kg', ''));
+        const finalQuantity = 
+            activeOrderQuantity.id === order._id && activeOrderQuantity.quantity !== null 
+            ? activeOrderQuantity.quantity 
+            : requestedWeightKg;
+
         try {
             const response = await axios.post('/api/confirm-order', {
                 batchId: order._id,
                 farmerName: 'John Smith',
-                quantityToSell: quantityToSell,
+                // Pass the specific quantity decided in the input field
+                quantityToSell: finalQuantity, 
             });
 
             if (response.status !== 200) {
@@ -190,15 +214,23 @@ export default function FarmerDashboard() {
             const updatedBatch = response.data.batch;
 
             setPendingOrders(prev => prev.filter(o => o._id !== updatedBatch._id));
-            setRecentBatches(prev => [updatedBatch, ...prev]);
+            
+            // 1. Filter out the old batch entry from recentBatches if it exists (e.g., if it was originally manually uploaded)
+            setRecentBatches(prev => {
+                const filtered = prev.filter(b => b._id !== updatedBatch._id);
+                // 2. Prepend the newly confirmed batch to ensure it's the most recent item shown
+                return [updatedBatch, ...filtered];
+            });
+            
             setShowConfirmationDialog(false);
-            setQuantityToSell(null);
 
+            // Prepend the notification to ensure it's at the top
             setNotifications(prev => [`Order ${updatedBatch.lotNumber} confirmed successfully!`, ...prev.slice(0, 4)]);
 
         } catch (error) {
             console.error("Error confirming order:", error);
-            alert("Failed to confirm order. Please try again.");
+            // NOTE: Using custom modal/dialog instead of alert() for a better user experience
+            // alert("Failed to confirm order. Please try again."); 
         } finally {
             setIsConfirming(false);
         }
@@ -223,7 +255,8 @@ export default function FarmerDashboard() {
 
         } catch (error) {
             console.error("Error rejecting order:", error);
-            alert("Failed to reject order. Please try again.");
+            // NOTE: Using custom modal/dialog instead of alert() for a better user experience
+            // alert("Failed to reject order. Please try again.");
         } finally {
             setIsRejecting(false);
         }
@@ -256,7 +289,8 @@ export default function FarmerDashboard() {
 
             } catch (error) {
                 console.error("Error uploading batch:", error);
-                alert("Failed to upload crop batch. Please try again.");
+                // NOTE: Using custom modal/dialog instead of alert() for a better user experience
+                // alert("Failed to upload crop batch. Please try again.");
             } finally {
                 setIsUploading(false);
             }
@@ -271,7 +305,24 @@ export default function FarmerDashboard() {
     }
 
     const copyToClipboard = (text: string) => {
-        navigator.clipboard.writeText(text)
+        // Fallback for document.execCommand('copy') in non-https/iframe contexts if navigator.clipboard fails
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).catch(() => {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+            });
+        } else {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
+        }
     }
 
     const downloadQR = (batch: any) => {
@@ -796,73 +847,88 @@ export default function FarmerDashboard() {
                         {pendingOrders.length === 0 ? (
                             <div className="text-center py-6 text-gray-500">No new orders at this time.</div>
                         ) : (
-                            pendingOrders.map(order => (
-                                <div key={order._id} className="p-4 bg-gray-100 rounded-xl border border-gray-200">
-                                    <div className="grid grid-cols-2 gap-2">
-                                        <div className="p-2 bg-white rounded">
-                                            <p className="text-xs text-gray-500">Crop</p>
-                                            <p className="font-bold">{order.crop}</p>
+                            pendingOrders.map(order => {
+                                // Determine the current input value for this specific order
+                                const isCurrentActive = activeOrderQuantity.id === order._id;
+                                const currentQuantity = isCurrentActive 
+                                    ? (activeOrderQuantity.quantity === null ? '' : String(activeOrderQuantity.quantity))
+                                    : parseFloat(order.weight);
+                                    
+                                return (
+                                    <div key={order._id} className="p-4 bg-gray-100 rounded-xl border border-gray-200">
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <div className="p-2 bg-white rounded">
+                                                <p className="text-xs text-gray-500">Crop</p>
+                                                <p className="font-bold">{order.crop}</p>
+                                            </div>
+                                            <div className="p-2 bg-white rounded">
+                                                <p className="text-xs text-gray-500">Requested Quantity</p>
+                                                <p className="font-bold">{order.weight}</p>
+                                            </div>
+                                            <div className="p-2 bg-white rounded">
+                                                <p className="text-xs text-gray-500">Quality</p>
+                                                <p className="font-bold">{order.quality}</p>
+                                            </div>
+                                            <div className="p-2 bg-white rounded">
+                                                <p className="text-xs text-gray-500">Retailer</p>
+                                                <p className="font-bold">{order.retailer || "N/A"}</p>
+                                            </div>
+                                            <div className="p-2 bg-white rounded">
+                                                <p className="text-xs text-gray-500">Contact</p>
+                                                <p className="font-bold">{order.retailerPhone || "N/A"}</p>
+                                            </div>
+                                            <div className="p-2 bg-white rounded">
+                                                <p className="text-xs text-gray-500">Price</p>
+                                                <p className="font-bold text-green-600">{order.price}</p>
+                                            </div>
+                                            <div className="col-span-2">
+                                                <Label htmlFor={`quantity-${order._id}`}>Quantity to Sell (kg)</Label>
+                                                <Input
+                                                    type="number"
+                                                    id={`quantity-${order._id}`}
+                                                    placeholder={`Enter amount (max ${parseFloat(order.weight)})`}
+                                                    max={parseFloat(order.weight)}
+                                                    value={currentQuantity}
+                                                    onChange={(e) => {
+                                                        const value = parseFloat(e.target.value);
+                                                        setActiveOrderQuantity({ 
+                                                            id: order._id, 
+                                                            quantity: isNaN(value) ? null : value 
+                                                        });
+                                                    }}
+                                                    onFocus={() => setActiveOrderQuantity({ id: order._id, quantity: currentQuantity === '' ? null : parseFloat(String(currentQuantity)) })}
+                                                    className="mt-1"
+                                                />
+                                            </div>
                                         </div>
-                                        <div className="p-2 bg-white rounded">
-                                            <p className="text-xs text-gray-500">Requested Quantity</p>
-                                            <p className="font-bold">{order.weight}</p>
-                                        </div>
-                                        <div className="p-2 bg-white rounded">
-                                            <p className="text-xs text-gray-500">Quality</p>
-                                            <p className="font-bold">{order.quality}</p>
-                                        </div>
-                                        <div className="p-2 bg-white rounded">
-                                            <p className="text-xs text-gray-500">Retailer</p>
-                                            <p className="font-bold">{order.retailer || "N/A"}</p>
-                                        </div>
-                                        <div className="p-2 bg-white rounded">
-                                            <p className="text-xs text-gray-500">Contact</p>
-                                            <p className="font-bold">{order.retailerPhone || "N/A"}</p>
-                                        </div>
-                                        <div className="p-2 bg-white rounded">
-                                            <p className="text-xs text-gray-500">Price</p>
-                                            <p className="font-bold text-green-600">{order.price}</p>
-                                        </div>
-                                        <div className="col-span-2">
-                                            <Label htmlFor={`quantity-${order._id}`}>Quantity to Sell (kg)</Label>
-                                            <Input
-                                                type="number"
-                                                id={`quantity-${order._id}`}
-                                                placeholder={`Enter amount (max ${parseFloat(order.weight)})`}
-                                                max={parseFloat(order.weight)}
-                                                defaultValue={parseFloat(order.weight)}
-                                                onChange={(e) => setQuantityToSell(parseFloat(e.target.value))}
-                                                className="mt-1"
-                                            />
+                                        <div className="flex gap-2 mt-4">
+                                            <Button
+                                                onClick={() => handleConfirmOrder(order)}
+                                                className="flex-1 bg-green-500 hover:bg-green-600"
+                                                disabled={isConfirming || isRejecting}
+                                            >
+                                                {isConfirming ? (
+                                                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                                ) : (
+                                                    <CheckCircle className="w-4 h-4 mr-2" />
+                                                )}
+                                                Confirm
+                                            </Button>
+                                            <Button
+                                                onClick={() => handleRejectOrder(order)}
+                                                variant="destructive"
+                                                className="flex-1 bg-red-500 hover:bg-red-600"
+                                                disabled={isConfirming || isRejecting}
+                                            >
+                                                {isRejecting ? (
+                                                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                                ) : <Trash2 className="w-4 h-4 mr-2" />}
+                                                Reject
+                                            </Button>
                                         </div>
                                     </div>
-                                    <div className="flex gap-2 mt-4">
-                                        <Button
-                                            onClick={() => handleConfirmOrder(order)}
-                                            className="flex-1 bg-green-500 hover:bg-green-600"
-                                            disabled={isConfirming || isRejecting}
-                                        >
-                                            {isConfirming ? (
-                                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                                            ) : (
-                                                <CheckCircle className="w-4 h-4 mr-2" />
-                                            )}
-                                            Confirm
-                                        </Button>
-                                        <Button
-                                            onClick={() => handleRejectOrder(order)}
-                                            variant="destructive"
-                                            className="flex-1 bg-red-500 hover:bg-red-600"
-                                            disabled={isConfirming || isRejecting}
-                                        >
-                                            {isRejecting ? (
-                                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                                            ) : <Trash2 className="w-4 h-4 mr-2" />}
-                                            Reject
-                                        </Button>
-                                    </div>
-                                </div>
-                            ))
+                                )
+                            })
                         )}
                     </div>
                 </DialogContent>

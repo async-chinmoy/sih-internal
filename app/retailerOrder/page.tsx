@@ -125,7 +125,7 @@ export default function RetailerOrderPageFull() {
     setError("");
 
     try {
-      const response = await axios.post("/api/order-request", {
+      const payload = {
         cropName,
         quantityKg,
         selectedGrade,
@@ -133,8 +133,16 @@ export default function RetailerOrderPageFull() {
         contactPhone,
         preferredDate,
         notes,
-        price: totalExpectedPrice,
-      });
+        price: Number(quantityKg) * Number(expectedPricePerKg),
+      };
+
+      // Log the payload before sending
+      console.log("Sending order request with payload:", payload);
+
+      const response = await axios.post("/api/order-request", payload);
+      
+      // Log the full response to help with debugging
+      console.log("API response received:", response);
 
       if (response.status !== 201) {
         throw new Error("Failed to place order request.");
@@ -152,10 +160,14 @@ export default function RetailerOrderPageFull() {
       setNotes("");
     } catch (err: any) {
       console.error("Failed to place order:", err);
+      // Log the error response from the server
+      if (axios.isAxiosError(err) && err.response) {
+        console.error("Server error response:", err.response.data);
+      }
       if (axios.isAxiosError(err) && err.response?.data?.message) {
         setError(err.response.data.message);
       } else {
-        setError("Failed to place order. Please try again.");
+        setError("Failed to place order. Please check your connection and try again.");
       }
     } finally {
       setIsSubmitting(false);
@@ -256,7 +268,7 @@ export default function RetailerOrderPageFull() {
               </div>
             </CardHeader>
             <CardContent className="space-y-6">
-              {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
+              {error && <p className="text-sm text-red-600 font-medium mb-4 p-2 bg-red-50 rounded-lg">{error}</p>}
               
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
                 <div>
