@@ -9,7 +9,7 @@ i18n
   .init({
     lng: 'en', // default language
     fallbackLng: 'en',
-    debug: process.env.NODE_ENV === 'development',
+    debug: false,
     interpolation: {
       escapeValue: false, // React already escapes values
     },

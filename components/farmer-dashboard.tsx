@@ -121,14 +121,16 @@ export default function FarmerDashboard() {
     const [recentBatches, setRecentBatches] = useState<BatchData[]>([])
     const [notifications, setNotifications] = useState<string[]>([])
     const [isUploading, setIsUploading] = useState(false)
-    const [isConfirming, setIsConfirming] = useState(false);
-    const [isRejecting, setIsRejecting] = useState(false);
+    
+    // Fixed: Individual loading states for each order
+    const [confirmingOrders, setConfirmingOrders] = useState<Set<string>>(new Set());
+    const [rejectingOrders, setRejectingOrders] = useState<Set<string>>(new Set());
 
     const [pendingOrders, setPendingOrders] = useState<BatchData[]>([]);
     const [showConfirmationDialog, setShowConfirmationDialog] = useState(false);
 
-    // State to track the quantity being input by the user for the *currently active* order.
-    const [activeOrderQuantity, setActiveOrderQuantity] = useState<{ id: string; quantity: number | null }>({ id: '', quantity: null });
+    // State to track the quantity being input by the user for each order individually
+    const [orderQuantities, setOrderQuantities] = useState<Record<string, number | null>>({});
 
     const fetchBatches = async () => {
         try {
@@ -138,7 +140,13 @@ export default function FarmerDashboard() {
             // Sort batches by creation date to show the latest at the top
             const sortedBatches = allBatches.sort((a: BatchData, b: BatchData) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
             
-            setRecentBatches(sortedBatches.filter((b: any) => b.lotNumber !== null && b.status !== 'Rejected'));
+            // Fixed: Only show confirmed orders (with lotNumber and not rejected/pending confirmation)
+            setRecentBatches(sortedBatches.filter((b: any) => 
+                b.lotNumber !== null && 
+                b.status !== 'Rejected' && 
+                b.status !== 'Awaiting Farmer Confirmation'
+            ));
+            
             setPendingOrders(sortedBatches.filter((b: any) => b.status === "Awaiting Farmer Confirmation"));
         } catch (error) {
             console.error("Failed to fetch batches:", error);
@@ -166,10 +174,12 @@ export default function FarmerDashboard() {
 
         const systemChannel = pusher.subscribe('system-channel');
         systemChannel.bind('batch-uploaded', (data: { batch: any }) => {
-            // Ensure new batch notification is added to the front
-            setRecentBatches(prev => [data.batch, ...prev]);
-            if (data.batch && data.batch.crop) {
-                setNotifications(prev => [`New batch of ${data.batch.crop} created!`, ...prev.slice(0, 4)]);
+            // Only add to recent batches if it's confirmed (has lotNumber and proper status)
+            if (data.batch && data.batch.lotNumber && data.batch.status !== 'Awaiting Farmer Confirmation') {
+                setRecentBatches(prev => [data.batch, ...prev]);
+                if (data.batch.crop) {
+                    setNotifications(prev => [`New batch of ${data.batch.crop} created!`, ...prev.slice(0, 4)]);
+                }
             }
         });
 
@@ -181,29 +191,27 @@ export default function FarmerDashboard() {
         };
     }, []);
     
-    // Reset active order quantity when the dialog closes
+    // Reset order quantities when the dialog closes
     useEffect(() => {
         if (!showConfirmationDialog) {
-            setActiveOrderQuantity({ id: '', quantity: null });
+            setOrderQuantities({});
         }
     }, [showConfirmationDialog]);
 
-
-    const handleConfirmOrder = async (order: any) => {
-        setIsConfirming(true);
+    const handleConfirmOrder = async (order: BatchData) => {
+        // Set loading state for this specific order
+        setConfirmingOrders(prev => new Set(prev).add(order._id));
         
-        // Use the quantity from the activeOrderQuantity state if it matches the current order, otherwise use the original requested weight
+        // Use the quantity from the orderQuantities state if it exists, otherwise use the original requested weight
         const requestedWeightKg = parseFloat(order.weight.replace(' kg', ''));
-        const finalQuantity = 
-            activeOrderQuantity.id === order._id && activeOrderQuantity.quantity !== null 
-            ? activeOrderQuantity.quantity 
+        const finalQuantity = orderQuantities[order._id] !== null && orderQuantities[order._id] !== undefined
+            ? orderQuantities[order._id]! 
             : requestedWeightKg;
 
         try {
             const response = await axios.post('/api/confirm-order', {
                 batchId: order._id,
-                farmerName: 'John Smith',
-                // Pass the specific quantity decided in the input field
+                farmerName: 'Manish',
                 quantityToSell: finalQuantity, 
             });
 
@@ -213,31 +221,46 @@ export default function FarmerDashboard() {
 
             const updatedBatch = response.data.batch;
 
+            // Remove from pending orders
             setPendingOrders(prev => prev.filter(o => o._id !== updatedBatch._id));
             
-            // 1. Filter out the old batch entry from recentBatches if it exists (e.g., if it was originally manually uploaded)
+            // Add to recent batches (now it's confirmed)
             setRecentBatches(prev => {
                 const filtered = prev.filter(b => b._id !== updatedBatch._id);
-                // 2. Prepend the newly confirmed batch to ensure it's the most recent item shown
                 return [updatedBatch, ...filtered];
             });
             
-            setShowConfirmationDialog(false);
+            // Remove quantity tracking for this order
+            setOrderQuantities(prev => {
+                const updated = { ...prev };
+                delete updated[order._id];
+                return updated;
+            });
 
-            // Prepend the notification to ensure it's at the top
             setNotifications(prev => [`Order ${updatedBatch.lotNumber} confirmed successfully!`, ...prev.slice(0, 4)]);
+
+            // Close dialog if no more pending orders
+            if (pendingOrders.length <= 1) {
+                setShowConfirmationDialog(false);
+            }
 
         } catch (error) {
             console.error("Error confirming order:", error);
-            // NOTE: Using custom modal/dialog instead of alert() for a better user experience
-            // alert("Failed to confirm order. Please try again."); 
+            setNotifications(prev => [`Failed to confirm order for ${order.crop}`, ...prev.slice(0, 4)]);
         } finally {
-            setIsConfirming(false);
+            // Remove loading state for this specific order
+            setConfirmingOrders(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(order._id);
+                return newSet;
+            });
         }
     };
 
-    const handleRejectOrder = async (order: any) => {
-        setIsRejecting(true);
+    const handleRejectOrder = async (order: BatchData) => {
+        // Set loading state for this specific order
+        setRejectingOrders(prev => new Set(prev).add(order._id));
+        
         try {
             const response = await axios.post('/api/reject-order', {
                 batchId: order._id,
@@ -247,19 +270,42 @@ export default function FarmerDashboard() {
                 throw new Error('Failed to reject order.');
             }
 
-            const updatedBatch = { ...order, status: 'Rejected' };
-            setPendingOrders(prev => prev.filter(o => o._id !== updatedBatch._id));
-            setShowConfirmationDialog(false);
+            // Remove from pending orders
+            setPendingOrders(prev => prev.filter(o => o._id !== order._id));
+            
+            // Remove quantity tracking for this order
+            setOrderQuantities(prev => {
+                const updated = { ...prev };
+                delete updated[order._id];
+                return updated;
+            });
 
-            setNotifications(prev => [`Order for ${updatedBatch.crop} rejected.`, ...prev.slice(0, 4)]);
+            setNotifications(prev => [`Order for ${order.crop} rejected.`, ...prev.slice(0, 4)]);
+
+            // Close dialog if no more pending orders
+            if (pendingOrders.length <= 1) {
+                setShowConfirmationDialog(false);
+            }
 
         } catch (error) {
             console.error("Error rejecting order:", error);
-            // NOTE: Using custom modal/dialog instead of alert() for a better user experience
-            // alert("Failed to reject order. Please try again.");
+            setNotifications(prev => [`Failed to reject order for ${order.crop}`, ...prev.slice(0, 4)]);
         } finally {
-            setIsRejecting(false);
+            // Remove loading state for this specific order
+            setRejectingOrders(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(order._id);
+                return newSet;
+            });
         }
+    };
+
+    const handleQuantityChange = (orderId: string, value: string) => {
+        const numValue = parseFloat(value);
+        setOrderQuantities(prev => ({
+            ...prev,
+            [orderId]: isNaN(numValue) ? null : numValue
+        }));
     };
 
     const handleQuickSubmit = async () => {
@@ -289,8 +335,7 @@ export default function FarmerDashboard() {
 
             } catch (error) {
                 console.error("Error uploading batch:", error);
-                // NOTE: Using custom modal/dialog instead of alert() for a better user experience
-                // alert("Failed to upload crop batch. Please try again.");
+                setNotifications(prev => [`Failed to upload crop batch`, ...prev.slice(0, 4)]);
             } finally {
                 setIsUploading(false);
             }
@@ -305,7 +350,6 @@ export default function FarmerDashboard() {
     }
 
     const copyToClipboard = (text: string) => {
-        // Fallback for document.execCommand('copy') in non-https/iframe contexts if navigator.clipboard fails
         if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(text).catch(() => {
                 const textarea = document.createElement('textarea');
@@ -480,15 +524,15 @@ export default function FarmerDashboard() {
                             Home
                         </Button>
                         <div className="text-center">
-                            <h1 className="text-2xl md:text-3xl font-bold bg-gradient-to-r from-green-600 to-emerald-600 bg-clip-text text-transparent">
+                            <h1 className="text-xl sm:text-2xl md:text-3xl font-bold bg-gradient-to-r from-green-600 to-emerald-600 bg-clip-text text-transparent">
                                 {t("FarmerDashboard.greeting")}
                             </h1>
                             <p className="text-green-600 text-sm md:text-base">{t('FarmerDashboard.manage_farm')}</p>
                         </div>
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2 sm:gap-3">
                             <Badge
                                 variant="secondary"
-                                className="px-4 py-2 text-lg bg-green-100 text-green-700 hover:bg-green-200 transition-colors"
+                                className="px-2 sm:px-4 py-1 sm:py-2 text-sm sm:text-lg bg-green-100 text-green-700 hover:bg-green-200 transition-colors"
                             >
                                 {t("FarmerDashboard.farm_id")}
                             </Badge>
@@ -507,13 +551,13 @@ export default function FarmerDashboard() {
             <div className="container mx-auto px-4 py-6">
 
                 {showSuccess && (
-                    <div className="mb-6 p-6 bg-gradient-to-r from-green-100 to-emerald-100 border border-green-300 rounded-2xl shadow-lg animate-in slide-in-from-top duration-500">
+                    <div className="mb-6 p-4 sm:p-6 bg-gradient-to-r from-green-100 to-emerald-100 border border-green-300 rounded-2xl shadow-lg animate-in slide-in-from-top duration-500">
                         <div className="flex items-center gap-4">
-                            <div className="w-12 h-12 bg-green-500 rounded-full flex items-center justify-center">
-                                <CheckCircle className="w-6 h-6 text-white" />
+                            <div className="w-8 h-8 sm:w-12 sm:h-12 bg-green-500 rounded-full flex items-center justify-center">
+                                <CheckCircle className="w-4 h-4 sm:w-6 sm:h-6 text-white" />
                             </div>
                             <div>
-                                <span className="text-green-800 font-bold text-xl block">{t("FarmerDashboard.upload_success_message")}</span>
+                                <span className="text-green-800 font-bold text-lg sm:text-xl block">{t("FarmerDashboard.upload_success_message")}</span>
                                 <span className="text-green-700 text-sm">
                                     {t("FarmerDashboard.upload_success_subtext")}
                                 </span>
@@ -527,12 +571,12 @@ export default function FarmerDashboard() {
                         {notifications.map((notification, index) => (
                             <div
                                 key={index}
-                                className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl shadow-sm animate-in slide-in-from-right duration-500"
+                                className="p-3 sm:p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl shadow-sm animate-in slide-in-from-right duration-500"
                                 style={{ animationDelay: `${index * 100}ms` }}
                             >
                                 <div className="flex items-center gap-3">
                                     <div className="w-3 h-3 bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full animate-pulse" />
-                                    <span className="text-blue-800 font-medium flex-1">{notification}</span>
+                                    <span className="text-blue-800 font-medium flex-1 text-sm sm:text-base">{notification}</span>
                                     <Button
                                         variant="ghost"
                                         size="sm"
@@ -552,51 +596,51 @@ export default function FarmerDashboard() {
                         <Card className="shadow-xl bg-gradient-to-br from-white to-green-50/50 border-0 overflow-hidden">
                             <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-green-400 via-emerald-400 to-cyan-400" />
                             <CardHeader className="pb-6">
-                                <CardTitle className="text-2xl md:text-3xl text-green-700 flex items-center gap-3">
-                                    <div className="w-10 h-10 bg-gradient-to-br from-green-500 to-emerald-500 rounded-xl flex items-center justify-center">
-                                        <Leaf className="w-6 h-6 text-white" />
+                                <CardTitle className="text-xl sm:text-2xl md:text-3xl text-green-700 flex items-center gap-3">
+                                    <div className="w-8 h-8 sm:w-10 sm:h-10 bg-gradient-to-br from-green-500 to-emerald-500 rounded-xl flex items-center justify-center">
+                                        <Leaf className="w-4 h-4 sm:w-6 sm:h-6 text-white" />
                                     </div>
                                     {t("FarmerDashboard.upload_new_crop")}
                                 </CardTitle>
-                                <CardDescription className="text-lg text-gray-600">
+                                <CardDescription className="text-base sm:text-lg text-gray-600">
                                     {t("FarmerDashboard.upload_description")}
                                 </CardDescription>
                             </CardHeader>
-                            <CardContent className="space-y-8">
-                                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <CardContent className="space-y-6 sm:space-y-8">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
                                     <div className="space-y-4">
-                                        <Label className="text-lg font-semibold flex items-center gap-2">
-                                            <span className="w-6 h-6 bg-green-500 text-white rounded-full flex items-center justify-center text-sm font-bold">
+                                        <Label className="text-base sm:text-lg font-semibold flex items-center gap-2">
+                                            <span className="w-5 h-5 sm:w-6 sm:h-6 bg-green-500 text-white rounded-full flex items-center justify-center text-xs sm:text-sm font-bold">
                                                 1
                                             </span>
                                             {t("FarmerDashboard.label_crop")}
                                         </Label>
                                         <Select value={cropData.type} onValueChange={(value) => setCropData({ ...cropData, type: value })}>
-                                            <SelectTrigger className="h-16 text-lg border-2 hover:border-green-300 transition-colors duration-300 bg-white">
+                                            <SelectTrigger className="h-12 sm:h-16 text-base sm:text-lg border-2 hover:border-green-300 transition-colors duration-300 bg-white">
                                                 <SelectValue placeholder={t("FarmerDashboard.placeholder_crop")} />
                                             </SelectTrigger>
                                             <SelectContent>
-                                                <SelectItem value="tomatoes" className="text-lg py-3">
+                                                <SelectItem value="tomatoes" className="text-base sm:text-lg py-3">
                                                     {t("FarmerDashboard.step_1_crop_tomatoes")}
                                                 </SelectItem>
-                                                <SelectItem value="carrots" className="text-lg py-3">
+                                                <SelectItem value="carrots" className="text-base sm:text-lg py-3">
                                                     {t("FarmerDashboard.step_1_crop_carrots")}
                                                 </SelectItem>
-                                                <SelectItem value="lettuce" className="text-lg py-3">
+                                                <SelectItem value="lettuce" className="text-base sm:text-lg py-3">
                                                     {t("FarmerDashboard.step_1_crop_lettuce")}
                                                 </SelectItem>
-                                                <SelectItem value="potatoes" className="text-lg py-3">
+                                                <SelectItem value="potatoes" className="text-base sm:text-lg py-3">
                                                     {t("FarmerDashboard.step_1_crop_potatoes")}
                                                 </SelectItem>
-                                                <SelectItem value="onions" className="text-lg py-3">
+                                                <SelectItem value="onions" className="text-base sm:text-lg py-3">
                                                     {t("FarmerDashboard.step_1_crop_onions")}
                                                 </SelectItem>
                                             </SelectContent>
                                         </Select>
                                     </div>
                                     <div className="space-y-4">
-                                        <Label className="text-lg font-semibold flex items-center gap-2">
-                                            <span className="w-6 h-6 bg-green-500 text-white rounded-full flex items-center justify-center text-sm font-bold">
+                                        <Label className="text-base sm:text-lg font-semibold flex items-center gap-2">
+                                            <span className="w-5 h-5 sm:w-6 sm:h-6 bg-green-500 text-white rounded-full flex items-center justify-center text-xs sm:text-sm font-bold">
                                                 2
                                             </span>
                                             {t("FarmerDashboard.label_weight")}
@@ -604,34 +648,34 @@ export default function FarmerDashboard() {
                                         <Input
                                             type="number"
                                             placeholder={t("FarmerDashboard.placeholder_weight")}
-                                            className="h-16 text-lg text-center border-2 hover:border-green-300 transition-colors duration-300 bg-white"
+                                            className="h-12 sm:h-16 text-base sm:text-lg text-center border-2 hover:border-green-300 transition-colors duration-300 bg-white"
                                             value={cropData.weight}
                                             onChange={(e) => setCropData({ ...cropData, weight: e.target.value })}
                                         />
                                     </div>
                                     <div className="space-y-4">
-                                        <Label className="text-lg font-semibold flex items-center gap-2">
-                                            <span className="w-6 h-6 bg-green-500 text-white rounded-full flex items-center justify-center text-sm font-bold">
+                                        <Label className="text-base sm:text-lg font-semibold flex items-center gap-2">
+                                            <span className="w-5 h-5 sm:w-6 sm:h-6 bg-green-500 text-white rounded-full flex items-center justify-center text-xs sm:text-sm font-bold">
                                                 3
                                             </span>
                                             {t("FarmerDashboard.label_date")}
                                         </Label>
                                         <Input
                                             type="date"
-                                            className="h-16 text-lg border-2 hover:border-green-300 transition-colors duration-300 bg-white"
+                                            className="h-12 sm:h-16 text-base sm:text-lg border-2 hover:border-green-300 transition-colors duration-300 bg-white"
                                             value={cropData.harvestDate}
                                             onChange={(e) => setCropData({ ...cropData, harvestDate: e.target.value })}
                                         />
                                     </div>
                                     <div className="space-y-4">
-                                        <Label className="text-lg font-semibold flex items-center gap-2">
-                                            <span className="w-6 h-6 bg-green-500 text-white rounded-full flex items-center justify-center text-sm font-bold">
+                                        <Label className="text-base sm:text-lg font-semibold flex items-center gap-2">
+                                            <span className="w-5 h-5 sm:w-6 sm:h-6 bg-green-500 text-white rounded-full flex items-center justify-center text-xs sm:text-sm font-bold">
                                                 4
                                             </span>
                                             Quality Grade
                                         </Label>
                                         <Select value={cropData.quality} onValueChange={(value) => setCropData({ ...cropData, quality: value })}>
-                                            <SelectTrigger className="h-16 text-lg border-2 hover:border-green-300 transition-colors duration-300 bg-white">
+                                            <SelectTrigger className="h-12 sm:h-16 text-base sm:text-lg border-2 hover:border-green-300 transition-colors duration-300 bg-white">
                                                 <SelectValue placeholder="Select quality" />
                                             </SelectTrigger>
                                             <SelectContent>
@@ -647,17 +691,17 @@ export default function FarmerDashboard() {
                                     <Button
                                         onClick={handleQuickSubmit}
                                         size="lg"
-                                        className="flex-1 h-18 text-xl bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 shadow-xl transition-all duration-300 transform hover:scale-[1.02]"
+                                        className="flex-1 h-14 sm:h-18 text-lg sm:text-xl bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 shadow-xl transition-all duration-300 transform hover:scale-[1.02]"
                                         disabled={!cropData.type || !cropData.weight || !cropData.harvestDate || !cropData.quality || isUploading}
                                     >
                                         {isUploading ? (
                                             <>
-                                                <Loader2 className="w-6 h-6 mr-3 animate-spin" />
+                                                <Loader2 className="w-5 h-5 sm:w-6 sm:h-6 mr-3 animate-spin" />
                                                 {t("FarmerDashboard.uploading_message")}
                                             </>
                                         ) : (
                                             <>
-                                                <Upload className="w-6 h-6 mr-3" />
+                                                <Upload className="w-5 h-5 sm:w-6 sm:h-6 mr-3" />
                                                 {t("FarmerDashboard.button_upload_submit")}
                                             </>
                                         )}
@@ -665,9 +709,9 @@ export default function FarmerDashboard() {
                                     <Button
                                         size="lg"
                                         variant="outline"
-                                        className="h-18 px-8 bg-white border-2 border-green-200 hover:bg-green-50 hover:border-green-300 transition-all duration-300"
+                                        className="h-14 sm:h-18 px-6 sm:px-8 bg-white border-2 border-green-200 hover:bg-green-50 hover:border-green-300 transition-all duration-300"
                                     >
-                                        <Camera className="w-6 h-6 mr-2" />
+                                        <Camera className="w-5 h-5 sm:w-6 sm:h-6 mr-2" />
                                         {t("FarmerDashboard.button_upload_photo")}
                                     </Button>
                                 </div>
@@ -676,15 +720,15 @@ export default function FarmerDashboard() {
 
                         <Card className="shadow-xl bg-gradient-to-br from-white to-blue-50/30 border-0">
                             <CardHeader>
-                                <div className="flex items-center justify-between">
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                                     <div>
-                                        <CardTitle className="text-xl md:text-2xl text-green-700 flex items-center gap-3">
-                                            <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-indigo-500 rounded-lg flex items-center justify-center">
-                                                <TrendingUp className="w-5 h-5 text-white" />
+                                        <CardTitle className="text-lg sm:text-xl md:text-2xl text-green-700 flex items-center gap-3">
+                                            <div className="w-6 h-6 sm:w-8 sm:h-8 bg-gradient-to-br from-blue-500 to-indigo-500 rounded-lg flex items-center justify-center">
+                                                <TrendingUp className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
                                             </div>
                                             {t("FarmerDashboard.recent_harvests_title")}
                                         </CardTitle>
-                                        <CardDescription className="text-base">{t("FarmerDashboard.recent_harvests_subtitle")}</CardDescription>
+                                        <CardDescription className="text-sm sm:text-base">{t("FarmerDashboard.recent_harvests_subtitle")}</CardDescription>
                                     </div>
                                     <Button variant="outline" size="sm" className="bg-white">
                                         <BarChart3 className="w-4 h-4 mr-2" />
@@ -693,43 +737,43 @@ export default function FarmerDashboard() {
                                 </div>
                             </CardHeader>
                             <CardContent>
-                                <div className="space-y-6">
+                                <div className="space-y-4 sm:space-y-6">
                                     {recentBatches.length === 0 ? (
-                                        <div className="text-center py-12">
-                                            <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                                                <Package className="w-12 h-12 text-green-600" />
+                                        <div className="text-center py-8 sm:py-12">
+                                            <div className="w-16 h-16 sm:w-24 sm:h-24 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                                                <Package className="w-8 h-8 sm:w-12 sm:h-12 text-green-600" />
                                             </div>
-                                            <h3 className="text-xl font-semibold text-gray-700 mb-2">{t("FarmerDashboard.no_harvests_title")}</h3>
-                                            <p className="text-gray-500">{t("FarmerDashboard.no_harvests_subtitle")}</p>
+                                            <h3 className="text-lg sm:text-xl font-semibold text-gray-700 mb-2">{t("FarmerDashboard.no_harvests_title")}</h3>
+                                            <p className="text-gray-500 text-sm sm:text-base">{t("FarmerDashboard.no_harvests_subtitle")}</p>
                                         </div>
                                     ) : (
                                         recentBatches.map((batch, index) => (
                                             <div
                                                 key={batch._id}
-                                                className="p-6 bg-gradient-to-br from-white via-green-50/50 to-cyan-50/50 rounded-2xl border-2 border-green-100 hover:border-green-200 shadow-lg hover:shadow-xl transition-all duration-300 transform hover:scale-[1.01]"
+                                                className="p-4 sm:p-6 bg-gradient-to-br from-white via-green-50/50 to-cyan-50/50 rounded-2xl border-2 border-green-100 hover:border-green-200 shadow-lg hover:shadow-xl transition-all duration-300 transform hover:scale-[1.01]"
                                                 style={{ animationDelay: `${index * 100}ms` }}
                                             >
-                                                <div className="flex flex-col lg:flex-row lg:items-center justify-between mb-6">
-                                                    <div className="flex items-center gap-4 mb-4 lg:mb-0">
-                                                        <div className="text-5xl bg-white rounded-2xl p-3 shadow-md">
+                                                <div className="flex flex-col lg:flex-row lg:items-center justify-between mb-4 sm:mb-6">
+                                                    <div className="flex items-center gap-3 sm:gap-4 mb-4 lg:mb-0">
+                                                        <div className="text-3xl sm:text-5xl bg-white rounded-2xl p-2 sm:p-3 shadow-md">
                                                             {getCropEmoji(batch.crop.split(" ")[1]?.toLowerCase() || batch.crop.toLowerCase())}
                                                         </div>
                                                         <div>
-                                                            <h4 className="text-xl md:text-2xl font-bold text-gray-800">
+                                                            <h4 className="text-lg sm:text-xl md:text-2xl font-bold text-gray-800">
                                                                 {batch.crop}
                                                             </h4>
-                                                            <p className="text-green-600 font-bold text-lg">{batch.weight}</p>
-                                                            <div className="flex items-center gap-2 mt-2">
-                                                                <p className="text-sm text-gray-500 bg-gray-100 px-2 py-1 rounded">
+                                                            <p className="text-green-600 font-bold text-base sm:text-lg">{batch.weight}</p>
+                                                            <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2 mt-2">
+                                                                <p className="text-xs sm:text-sm text-gray-500 bg-gray-100 px-2 py-1 rounded">
                                                                     Lot: {batch.lotNumber}
                                                                 </p>
-                                                                <p className="text-sm text-gray-500">• ID: {batch._id?.slice(0, 8)}</p>
+                                                                <p className="text-xs sm:text-sm text-gray-500">• ID: {batch._id?.slice(0, 8)}</p>
                                                             </div>
                                                         </div>
                                                     </div>
                                                     <div className="text-left lg:text-right">
-                                                        <p className="text-2xl md:text-3xl font-bold text-green-700 mb-2">{batch.price}</p>
-                                                        <Badge className={`text-sm px-3 py-1 ${getStatusColor(batch.status)}`}>
+                                                        <p className="text-xl sm:text-2xl md:text-3xl font-bold text-green-700 mb-2">{batch.price}</p>
+                                                        <Badge className={`text-xs sm:text-sm px-2 sm:px-3 py-1 ${getStatusColor(batch.status)}`}>
                                                             {batch.status === "In Transit" && <Truck className="w-3 h-3 mr-1" />}
                                                             {batch.status === "Ready for Sale" && <Package className="w-3 h-3 mr-1" />}
                                                             {batch.status}
@@ -737,7 +781,7 @@ export default function FarmerDashboard() {
                                                     </div>
                                                 </div>
 
-                                                <div className="mb-6">
+                                                <div className="mb-4 sm:mb-6">
                                                     <div className="flex justify-between text-xs text-gray-600 mb-3 font-medium">
                                                         <span className="flex items-center gap-1">
                                                             <div className="w-2 h-2 bg-green-500 rounded-full" />
@@ -762,7 +806,6 @@ export default function FarmerDashboard() {
                                                 </div>
 
                                                 <div className="flex flex-col sm:flex-row gap-3">
-                                                    {/* Corrected Dialog Trigger */}
                                                     <Button
                                                         size="sm"
                                                         variant="outline"
@@ -796,7 +839,7 @@ export default function FarmerDashboard() {
                                 <Leaf className="w-4 h-4 text-green-500" />
                             </CardHeader>
                             <CardContent>
-                                <div className="text-3xl font-bold">{recentBatches.length} Batches</div>
+                                <div className="text-2xl sm:text-3xl font-bold">{recentBatches.length} Batches</div>
                                 <p className="text-xs text-gray-500">+20% from last month</p>
                             </CardContent>
                         </Card>
@@ -807,7 +850,7 @@ export default function FarmerDashboard() {
                                 <Package className="w-4 h-4 text-blue-500" />
                             </CardHeader>
                             <CardContent>
-                                <div className="text-3xl font-bold">
+                                <div className="text-2xl sm:text-3xl font-bold">
                                     {Array.isArray(recentBatches)
                                         ? recentBatches.reduce((sum, batch) => sum + Number(batch.weight?.replace("kg", "") || 0), 0)
                                         : 0}
@@ -823,7 +866,7 @@ export default function FarmerDashboard() {
                                 <DollarSign className="w-4 h-4 text-green-500" />
                             </CardHeader>
                             <CardContent>
-                                <div className="text-3xl font-bold">
+                                <div className="text-2xl sm:text-3xl font-bold">
                                     ₹{Array.isArray(recentBatches)
                                         ? recentBatches.reduce((sum, batch) => sum + Number(batch.price?.replace(/[$,₹]/g, "") || 0), 0)
                                         : 0}
@@ -848,56 +891,51 @@ export default function FarmerDashboard() {
                             <div className="text-center py-6 text-gray-500">No new orders at this time.</div>
                         ) : (
                             pendingOrders.map(order => {
-                                // Determine the current input value for this specific order
-                                const isCurrentActive = activeOrderQuantity.id === order._id;
-                                const currentQuantity = isCurrentActive 
-                                    ? (activeOrderQuantity.quantity === null ? '' : String(activeOrderQuantity.quantity))
-                                    : parseFloat(order.weight);
+                                const isConfirming = confirmingOrders.has(order._id);
+                                const isRejecting = rejectingOrders.has(order._id);
+                                const currentQuantity = orderQuantities[order._id];
+                                const requestedWeight = parseFloat(order.weight.replace(' kg', ''));
                                     
                                 return (
                                     <div key={order._id} className="p-4 bg-gray-100 rounded-xl border border-gray-200">
                                         <div className="grid grid-cols-2 gap-2">
                                             <div className="p-2 bg-white rounded">
                                                 <p className="text-xs text-gray-500">Crop</p>
-                                                <p className="font-bold">{order.crop}</p>
+                                                <p className="font-bold text-sm">{order.crop}</p>
                                             </div>
                                             <div className="p-2 bg-white rounded">
                                                 <p className="text-xs text-gray-500">Requested Quantity</p>
-                                                <p className="font-bold">{order.weight}</p>
+                                                <p className="font-bold text-sm">{order.weight}</p>
                                             </div>
                                             <div className="p-2 bg-white rounded">
                                                 <p className="text-xs text-gray-500">Quality</p>
-                                                <p className="font-bold">{order.quality}</p>
+                                                <p className="font-bold text-sm">{order.quality}</p>
                                             </div>
                                             <div className="p-2 bg-white rounded">
                                                 <p className="text-xs text-gray-500">Retailer</p>
-                                                <p className="font-bold">{order.retailer || "N/A"}</p>
+                                                <p className="font-bold text-sm">{order.retailer || "N/A"}</p>
                                             </div>
                                             <div className="p-2 bg-white rounded">
                                                 <p className="text-xs text-gray-500">Contact</p>
-                                                <p className="font-bold">{order.retailerPhone || "N/A"}</p>
+                                                <p className="font-bold text-sm">{order.retailerPhone || "N/A"}</p>
                                             </div>
                                             <div className="p-2 bg-white rounded">
                                                 <p className="text-xs text-gray-500">Price</p>
-                                                <p className="font-bold text-green-600">{order.price}</p>
+                                                <p className="font-bold text-sm text-green-600">{order.price}</p>
                                             </div>
                                             <div className="col-span-2">
-                                                <Label htmlFor={`quantity-${order._id}`}>Quantity to Sell (kg)</Label>
+                                                <Label htmlFor={`quantity-${order._id}`} className="text-sm">
+                                                    Quantity to Sell (kg)
+                                                </Label>
                                                 <Input
                                                     type="number"
                                                     id={`quantity-${order._id}`}
-                                                    placeholder={`Enter amount (max ${parseFloat(order.weight)})`}
-                                                    max={parseFloat(order.weight)}
-                                                    value={currentQuantity}
-                                                    onChange={(e) => {
-                                                        const value = parseFloat(e.target.value);
-                                                        setActiveOrderQuantity({ 
-                                                            id: order._id, 
-                                                            quantity: isNaN(value) ? null : value 
-                                                        });
-                                                    }}
-                                                    onFocus={() => setActiveOrderQuantity({ id: order._id, quantity: currentQuantity === '' ? null : parseFloat(String(currentQuantity)) })}
+                                                    placeholder={`Enter amount (max ${requestedWeight})`}
+                                                    max={requestedWeight}
+                                                    value={currentQuantity !== null && currentQuantity !== undefined ? currentQuantity : ''}
+                                                    onChange={(e) => handleQuantityChange(order._id, e.target.value)}
                                                     className="mt-1"
+                                                    disabled={isConfirming || isRejecting}
                                                 />
                                             </div>
                                         </div>

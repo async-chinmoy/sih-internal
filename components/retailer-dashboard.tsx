@@ -30,12 +30,46 @@ import {
     QrCode,
     TrendingUp,
     Edit,
-    Loader2
+    Loader2,
+    Truck,
+    X,
+    Bell
 } from "lucide-react"
 import Pusher from "pusher-js"
 import axios from "axios"
 import LanguageSwitcher from "@/components/LanguageSwitcher";
 import { ClientSideTime } from "@/components/ClientSideTime";
+
+// Toast notification component
+const Toast = ({ message, type, onClose }: { message: string, type: 'success' | 'info' | 'warning', onClose: () => void }) => {
+    useEffect(() => {
+        const timer = setTimeout(onClose, 5000);
+        return () => clearTimeout(timer);
+    }, [onClose]);
+
+    const bgColor = type === 'success' ? 'bg-green-500' : type === 'warning' ? 'bg-yellow-500' : 'bg-blue-500';
+    
+    return (
+        <div className={`fixed top-4 right-4 ${bgColor} text-white px-6 py-4 rounded-lg shadow-lg z-[100] max-w-md animate-in slide-in-from-right duration-300`}>
+            <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                    {type === 'success' && <CheckCircle className="w-5 h-5" />}
+                    {type === 'info' && <Bell className="w-5 h-5" />}
+                    {type === 'warning' && <Package className="w-5 h-5" />}
+                    <span className="font-medium">{message}</span>
+                </div>
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={onClose}
+                    className="text-white hover:bg-white/20 h-6 w-6 p-0"
+                >
+                    <X className="w-4 h-4" />
+                </Button>
+            </div>
+        </div>
+    );
+};
 
 // UPDATED: Interfaces now have all necessary fields
 interface IotData {
@@ -84,6 +118,12 @@ interface BatchData {
     retailerPhone?: string;
 }
 
+interface ToastMessage {
+    id: string;
+    message: string;
+    type: 'success' | 'info' | 'warning';
+}
+
 export default function RetailerDashboard() {
     const router = useRouter();
     const [batches, setBatches] = useState<BatchData[]>([]);
@@ -93,16 +133,33 @@ export default function RetailerDashboard() {
     const [filteredBatches, setFilteredBatches] = useState<BatchData[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     
+    // Toast notifications state
+    const [toasts, setToasts] = useState<ToastMessage[]>([]);
+    
     // Corrected state management for dialogs
     const [detailsDialogBatch, setDetailsDialogBatch] = useState<BatchData | null>(null);
     const [priceUpdateBatch, setPriceUpdateBatch] = useState<BatchData | null>(null);
     const [markAvailableBatch, setMarkAvailableBatch] = useState<BatchData | null>(null);
+    const [confirmDeliveryBatch, setConfirmDeliveryBatch] = useState<BatchData | null>(null);
 
     const [newPrice, setNewPrice] = useState("");
     const [notifications, setNotifications] = useState<string[]>([]);
 
+    // Loading states for individual delivery confirmations
+    const [confirmingDeliveries, setConfirmingDeliveries] = useState<Set<string>>(new Set());
+
     const retailerName = "Fresh Market Co.";
     const retailerId = "FM-001";
+
+    // Function to add toast notifications
+    const addToast = (message: string, type: 'success' | 'info' | 'warning') => {
+        const id = Date.now().toString();
+        setToasts(prev => [...prev, { id, message, type }]);
+    };
+
+    const removeToast = (id: string) => {
+        setToasts(prev => prev.filter(toast => toast.id !== id));
+    };
 
     const fetchBatches = async () => {
         setIsLoading(true);
@@ -116,12 +173,13 @@ export default function RetailerDashboard() {
         } catch (error) {
             console.error("Error fetching batches:", error);
             setBatches([]);
+            addToast("Failed to fetch inventory data", "warning");
         } finally {
             setIsLoading(false);
         }
     };
 
-    // UPDATED: useEffect to handle Pusher subscriptions
+    // UPDATED: useEffect to handle Pusher subscriptions with enhanced notifications
     useEffect(() => {
         fetchBatches();
 
@@ -131,9 +189,10 @@ export default function RetailerDashboard() {
 
         const channel = pusher.subscribe('retailer-channel');
         
-        channel.bind('batch-updated', (data: { batch: BatchData }) => {
+        // Listen for order confirmations from farmer
+        channel.bind('order-confirmed-by-farmer', (data: { batch: BatchData, message: string }) => {
             if (data && data.batch) {
-                setNotifications(prev => [`Status of lot ${data.batch.lotNumber} updated to ${data.batch.status}.`, ...prev.slice(0, 4)]);
+                addToast(`Order Confirmed! ${data.message}`, "success");
                 
                 setBatches(prevBatches => {
                     const existingIndex = prevBatches.findIndex(b => b._id === data.batch._id);
@@ -141,9 +200,39 @@ export default function RetailerDashboard() {
                         const updated = [...prevBatches];
                         updated[existingIndex] = data.batch;
                         return updated;
-                    } else {
+                    } else if (["Delivered", "Ready for Sale", "Sold", "In Transit", "Pending Verification"].includes(data.batch.status)) {
                         return [data.batch, ...prevBatches];
                     }
+                    return prevBatches;
+                });
+            }
+        });
+
+        // Listen for order rejections from farmer
+        channel.bind('order-rejected-by-farmer', (data: { batch: BatchData, message: string, rejectionReason: string }) => {
+            if (data && data.batch) {
+                addToast(`Order Rejected: ${data.rejectionReason}`, "warning");
+                
+                // Remove rejected batches from retailer view
+                setBatches(prevBatches => prevBatches.filter(b => b._id !== data.batch._id));
+            }
+        });
+
+        // Listen for general batch updates
+        channel.bind('batch-updated', (data: { batch: BatchData }) => {
+            if (data && data.batch) {
+                addToast(`Status Updated: Lot ${data.batch.lotNumber} is now ${data.batch.status}`, "info");
+                
+                setBatches(prevBatches => {
+                    const existingIndex = prevBatches.findIndex(b => b._id === data.batch._id);
+                    if (existingIndex !== -1) {
+                        const updated = [...prevBatches];
+                        updated[existingIndex] = data.batch;
+                        return updated;
+                    } else if (["Delivered", "Ready for Sale", "Sold", "In Transit", "Pending Verification"].includes(data.batch.status)) {
+                        return [data.batch, ...prevBatches];
+                    }
+                    return prevBatches;
                 });
             }
         });
@@ -181,6 +270,43 @@ export default function RetailerDashboard() {
         }
     };
 
+    // NEW: Function to confirm delivery received
+    const handleConfirmDelivery = async (batchId: string) => {
+        setConfirmingDeliveries(prev => new Set(prev).add(batchId));
+        
+        try {
+            const response = await axios.post('/api/confirm-delivery', {
+                batchId,
+                retailerName,
+                retailerId,
+                confirmationTime: new Date().toISOString()
+            });
+
+            if (response.status === 200) {
+                const updatedBatch = response.data.batch;
+                
+                setBatches(prev => {
+                    const updated = prev.map(batch => 
+                        batch._id === updatedBatch._id ? updatedBatch : batch
+                    );
+                    return updated;
+                });
+
+                addToast(`Delivery confirmed for lot ${updatedBatch.lotNumber}`, "success");
+                setConfirmDeliveryBatch(null);
+            }
+        } catch (error) {
+            console.error("Error confirming delivery:", error);
+            addToast("Failed to confirm delivery", "warning");
+        } finally {
+            setConfirmingDeliveries(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(batchId);
+                return newSet;
+            });
+        }
+    };
+
     const handleMakeAvailable = async (batchId: string) => {
         setIsUpdating(true);
         try {
@@ -189,17 +315,22 @@ export default function RetailerDashboard() {
             const newPrice = retailPrice ? `₹${retailPrice}` : originalPrice;
             const note = `Retail price set to ${newPrice}. Quality approved and made available for consumers.`;
 
-            await axios.post('/api/update-batch', {
+            const response = await axios.post('/api/update-batch', {
                 batchId,
                 updates: { ...updates, price: newPrice },
                 updatedBy: retailerName,
                 note,
             });
 
+            if (response.status === 200) {
+                addToast(`Item made available for sale at ${newPrice}`, "success");
+            }
+
             setRetailPrice("");
             setMarkAvailableBatch(null);
         } catch (error) {
             console.error("Error making batch available:", error);
+            addToast("Failed to make item available", "warning");
         } finally {
             setIsUpdating(false);
         }
@@ -213,17 +344,22 @@ export default function RetailerDashboard() {
             const updates = { price: `₹${newPrice}` };
             const note = `Price updated from ${originalPrice} to ₹${newPrice} by retailer.`;
 
-            await axios.post('/api/update-batch', {
+            const response = await axios.post('/api/update-batch', {
                 batchId,
                 updates,
                 updatedBy: retailerName,
                 note,
             });
+
+            if (response.status === 200) {
+                addToast(`Price updated to ₹${newPrice}`, "success");
+            }
             
             setNewPrice("");
             setPriceUpdateBatch(null);
         } catch (error) {
             console.error("Error updating price:", error);
+            addToast("Failed to update price", "warning");
         } finally {
             setIsUpdating(false);
         }
@@ -235,14 +371,20 @@ export default function RetailerDashboard() {
             const updates = { status: "Sold" };
             const note = "Successfully sold to consumer.";
 
-            await axios.post('/api/update-batch', {
+            const response = await axios.post('/api/update-batch', {
                 batchId,
                 updates,
                 updatedBy: retailerName,
                 note,
             });
+
+            if (response.status === 200) {
+                const soldBatch = batches.find(b => b._id === batchId);
+                addToast(`Item sold successfully! Revenue: ${soldBatch?.price}`, "success");
+            }
         } catch (error) {
             console.error("Error marking batch as sold:", error);
+            addToast("Failed to mark item as sold", "warning");
         } finally {
             setIsUpdating(false);
         }
@@ -277,7 +419,20 @@ export default function RetailerDashboard() {
     };
 
     const getActionButton = (batch: BatchData) => {
+        const isConfirmingThisDelivery = confirmingDeliveries.has(batch._id);
+        
         switch (batch.status) {
+            case "In Transit":
+                return (
+                    <Button 
+                        size="sm" 
+                        onClick={() => setConfirmDeliveryBatch(batch)}
+                        className="bg-blue-500 hover:bg-blue-600"
+                    >
+                        <Truck className="w-4 h-4 mr-2" />
+                        Confirm Delivery
+                    </Button>
+                );
             case "Delivered":
                 return (
                     <Button size="sm" onClick={() => setMarkAvailableBatch(batch)}>
@@ -320,64 +475,6 @@ export default function RetailerDashboard() {
                 return null;
         }
     };
-    
-    // Renders the content of the View Details dialog
-    const renderDetailsContent = () => {
-      if (!detailsDialogBatch) return null;
-      return (
-        <div className="space-y-6">
-            <div className="text-center bg-gray-50 p-6 rounded-xl mb-4">
-                <img
-                    src={detailsDialogBatch.qrCode || "/placeholder.svg"}
-                    alt={`QR Code for ${detailsDialogBatch.lotNumber}`}
-                    className="mx-auto border-2 border-gray-200 rounded-xl shadow-lg"
-                    width={200}
-                    height={200}
-                />
-            </div>
-            
-            <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                    <h4 className="font-semibold text-purple-700">Product Information</h4>
-                    <div className="text-sm space-y-1">
-                        <p><span className="font-medium">Crop:</span> {detailsDialogBatch.crop}</p>
-                        <p><span className="font-medium">Weight:</span> {detailsDialogBatch.weight}</p>
-                        <p><span className="font-medium">Quality:</span> {detailsDialogBatch.quality}</p>
-                        <p><span className="font-medium">Price:</span> {detailsDialogBatch.price}</p>
-                    </div>
-                </div>
-                <div className="space-y-2">
-                    <h4 className="font-semibold text-purple-700">Farm Information</h4>
-                    <div className="text-sm space-y-1">
-                        <p><span className="font-medium">Farmer:</span> {detailsDialogBatch.farmer}</p>
-                        <p><span className="font-medium">Location:</span> {detailsDialogBatch.farmLocation}</p>
-                        <p><span className="font-medium">Harvest Date:</span> {new Date(detailsDialogBatch.harvestDate).toLocaleDateString()}</p>
-                    </div>
-                </div>
-            </div>
-
-            <div className="space-y-2">
-                <h4 className="font-semibold text-purple-700">Supply Chain History</h4>
-                <div className="space-y-2 max-h-40 overflow-y-auto">
-                    {detailsDialogBatch.trackingHistory.map((entry, idx) => (
-                        <div key={idx} className="p-3 bg-purple-50 rounded-lg text-sm">
-                            <div className="flex justify-between items-start">
-                                <div>
-                                    <p className="font-medium">{entry.updatedBy}</p>
-                                    <p className="text-gray-600">{entry.note}</p>
-                                    <Badge className="mt-1 text-xs">{entry.status}</Badge>
-                                </div>
-                                <span className="text-xs text-gray-500">
-                                    {new Date(entry.timestamp).toLocaleString()}
-                                </span>
-                            </div>
-                        </div>
-                    ))}
-                </div>
-            </div>
-        </div>
-      );
-    };
 
     const totalRevenue = batches
         .filter((b) => b.status === "Sold")
@@ -385,6 +482,16 @@ export default function RetailerDashboard() {
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-purple-50 via-pink-50 to-indigo-50">
+            {/* Toast Notifications */}
+            {toasts.map((toast) => (
+                <Toast
+                    key={toast.id}
+                    message={toast.message}
+                    type={toast.type}
+                    onClose={() => removeToast(toast.id)}
+                />
+            ))}
+
             {/* Header */}
             <header className="bg-white/95 backdrop-blur-sm shadow-lg border-b border-purple-100 sticky top-0 z-50">
                 <div className="container mx-auto px-4 py-4">
@@ -421,6 +528,17 @@ export default function RetailerDashboard() {
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
                     <Card className="shadow-lg bg-white border-0">
                         <CardHeader className="flex flex-row items-center justify-between pb-2">
+                            <CardTitle className="text-sm font-medium text-gray-500">Pending Deliveries</CardTitle>
+                            <Truck className="w-4 h-4 text-blue-500" />
+                        </CardHeader>
+                        <CardContent>
+                            <div className="text-2xl font-bold">{batches.filter((b) => b.status === "In Transit").length}</div>
+                            <p className="text-xs text-gray-500">En route to store</p>
+                        </CardContent>
+                    </Card>
+
+                    <Card className="shadow-lg bg-white border-0">
+                        <CardHeader className="flex flex-row items-center justify-between pb-2">
                             <CardTitle className="text-sm font-medium text-gray-500">New Deliveries</CardTitle>
                             <Package className="w-4 h-4 text-blue-500" />
                         </CardHeader>
@@ -438,17 +556,6 @@ export default function RetailerDashboard() {
                         <CardContent>
                             <div className="text-2xl font-bold">{batches.filter((b) => b.status === "Ready for Sale").length}</div>
                             <p className="text-xs text-gray-500">On shelves now</p>
-                        </CardContent>
-                    </Card>
-
-                    <Card className="shadow-lg bg-white border-0">
-                        <CardHeader className="flex flex-row items-center justify-between pb-2">
-                            <CardTitle className="text-sm font-medium text-gray-500">Items Sold</CardTitle>
-                            <ShoppingCart className="w-4 h-4 text-purple-500" />
-                        </CardHeader>
-                        <CardContent>
-                            <div className="text-2xl font-bold">{batches.filter((b) => b.status === "Sold").length}</div>
-                            <p className="text-xs text-gray-500">This week</p>
                         </CardContent>
                     </Card>
 
@@ -554,6 +661,7 @@ export default function RetailerDashboard() {
                                                     <Badge className={`${getStatusColor(batch.status)} text-white`}>
                                                         {batch.status === "Ready for Sale" && <Store className="w-3 h-3 mr-1" />}
                                                         {batch.status === "Delivered" && <Package className="w-3 h-3 mr-1" />}
+                                                        {batch.status === "In Transit" && <Truck className="w-3 h-3 mr-1" />}
                                                         {batch.status === "Sold" && <ShoppingCart className="w-3 h-3 mr-1" />}
                                                         {batch.status}
                                                     </Badge>
@@ -587,6 +695,51 @@ export default function RetailerDashboard() {
                 </Card>
             </div>
             
+            {/* Confirm Delivery Dialog - NEW */}
+            <Dialog open={confirmDeliveryBatch !== null} onOpenChange={(isOpen) => !isOpen && setConfirmDeliveryBatch(null)}>
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Confirm Delivery Received</DialogTitle>
+                        <DialogDescription>
+                            Confirm that you have received this delivery - {confirmDeliveryBatch?.lotNumber}
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4">
+                        <div className="grid grid-cols-2 gap-4 text-sm">
+                            <div><span className="font-medium">Crop:</span> {confirmDeliveryBatch?.crop}</div>
+                            <div><span className="font-medium">Weight:</span> {confirmDeliveryBatch?.weight}</div>
+                            <div><span className="font-medium">Quality:</span> {confirmDeliveryBatch?.quality}</div>
+                            <div><span className="font-medium">Farmer:</span> {confirmDeliveryBatch?.farmer}</div>
+                            <div><span className="font-medium">Lot Number:</span> {confirmDeliveryBatch?.lotNumber}</div>
+                            <div><span className="font-medium">Price:</span> {confirmDeliveryBatch?.price}</div>
+                        </div>
+                        <div className="bg-blue-50 p-4 rounded-lg">
+                            <p className="text-sm text-blue-800">
+                                <strong>Important:</strong> Only confirm if you have physically received and inspected this delivery. 
+                                This action will be recorded on the blockchain and update the status to "Delivered".
+                            </p>
+                        </div>
+                        <Button 
+                            onClick={() => confirmDeliveryBatch && handleConfirmDelivery(confirmDeliveryBatch._id)} 
+                            disabled={confirmingDeliveries.has(confirmDeliveryBatch?._id || '')} 
+                            className="w-full bg-blue-500 hover:bg-blue-600"
+                        >
+                            {confirmingDeliveries.has(confirmDeliveryBatch?._id || '') ? (
+                                <>
+                                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                    Confirming Delivery...
+                                </>
+                            ) : (
+                                <>
+                                    <CheckCircle className="w-4 h-4 mr-2" />
+                                    Confirm Delivery Received
+                                </>
+                            )}
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
+
             {/* Make Available Dialog - now a global component */}
             <Dialog open={markAvailableBatch !== null} onOpenChange={(isOpen) => !isOpen && setMarkAvailableBatch(null)}>
                 <DialogContent>

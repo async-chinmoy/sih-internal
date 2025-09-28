@@ -254,7 +254,7 @@ export default function RetailerOrderPageFull() {
                 <Button variant="outline" size="sm" onClick={() => {
                   setSelectedCropPreset("");
                   setCustomCrop("");
-                  setQuantityKg("");
+                  setQuantityKg("");  
                   setSelectedGrade("A");
                   setContactPerson("John Doe");
                   setContactPhone("9876543210");
